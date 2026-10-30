@@ -16,12 +16,14 @@ A Model Context Protocol (MCP) server that connects AI assistants and agents (An
 
 ---
 
-## 🔒 Security Architecture
+## 🔒 Security & Governance
 
-- **100% Delegated Permissions**: The server operates strictly under the logged-in administrator's RBAC rights. It can never see or do anything the administrator is not authorized to do.
+- **100% Read-Only**: There are zero write, modify, or delete capabilities. The agent cannot alter mailboxes, reset passwords, or wipe devices.
+- **No `Mail.Read` Scope**: The tool physically lacks the permission to read user email messages. It only reads calendar ACLs and mailbox Out-of-Office settings.
+- **Delegated RBAC Permissions**: Operates under the signed-in administrator's exact Entra ID permissions.
 - **Enterprise OAuth 2.0 with PKCE**: Tokens are requested directly from `login.microsoftonline.com`, fully respecting your tenant's Conditional Access, Multi-Factor Authentication (MFA), and compliance policies.
-- **Persistent Local Token Cache**: Sign-in tokens are saved locally in `.token_cache.bin` (which is excluded from Git). Once authenticated, the server refreshes tokens silently in the background with zero popups.
-- **Auditable**: Every single query is logged in your Entra ID Sign-In & Audit logs under your registered App ID.
+- **Local Token Isolation**: Tokens are stored locally in `.token_cache.bin` on the admin's machine (never committed to Git).
+- **Auditable**: Every API call is logged in your Entra ID Sign-In & Audit logs under your registered App ID.
 
 ---
 
@@ -36,37 +38,61 @@ A Model Context Protocol (MCP) server that connects AI assistants and agents (An
   - `Calendars.Read`
   - `User.Read.All`
   - `DeviceManagementManagedDevices.Read.All`
-  *(Note: `Mail.Read` is NOT required. This tool physically cannot read email messages).*
+  *(Note: `Mail.Read` is NOT required).*
 
 ---
 
 ## ⚙️ Setup & Installation
 
-### 1. Clone & Configure Environment
+### Step 1: Install `uv`
 
+#### Windows (PowerShell):
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+#### macOS / Linux:
 ```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+---
+
+### Step 2: Clone & Configure Environment
+
+#### Windows (PowerShell):
+```powershell
 git clone git@github.com:amargh2/exchange-device-mcp-demo.git
 cd exchange-device-mcp-demo
 
-# Copy the example environment file and fill in your Azure App details
+# Copy the example environment file
+Copy-Item .env.example .env
+```
+
+#### macOS / Linux (Bash):
+```bash
+git clone git@github.com:amargh2/exchange-device-mcp-demo.git
+cd exchange-device-mcp-demo
 cp .env.example .env
 ```
 
-Edit `.env`:
+Edit `.env` with your Azure App Registration details:
 ```ini
 APPID=your_azure_client_app_id
 TENANTID=your_microsoft_365_tenant_id
 ```
 
-### 2. One-Time Sign-In (PKCE)
+---
 
-Run the login command in your terminal to complete interactive Microsoft sign-in:
+### Step 3: One-Time Sign-In (Interactive PKCE)
 
-```bash
+Run the login command in PowerShell or Bash:
+
+```powershell
 uv run exchange-device-mcp-demo.py --login
 ```
 
-A browser window will launch (and the sign-in URL is printed in the terminal). Sign in with your administrator account and accept the requested permissions. Tokens are saved to `.token_cache.bin`.
+Your system browser will automatically launch with the Microsoft sign-in prompt (the link is also printed in your terminal as a backup). Sign in with your administrator account and accept the requested permissions. Tokens are saved to your local `.token_cache.bin`.
 
 ---
 
@@ -74,7 +100,7 @@ A browser window will launch (and the sign-in URL is printed in the terminal). S
 
 ### In VS Code / Antigravity / Cursor
 
-Add the server to your `.vscode/mcp.json`:
+Add the server to your project's `.vscode/mcp.json`:
 
 ```json
 {
@@ -87,21 +113,24 @@ Add the server to your `.vscode/mcp.json`:
         "--directory",
         "${workspaceFolder}",
         "exchange-device-mcp-demo.py"
-      ],
-      "env": {
-        "BROWSER": "firefox",
-        "DISPLAY": ":0"
-      }
+      ]
     }
   }
 }
 ```
 
-### Example Prompts for the AI Agent:
+> [!NOTE]
+> **What is `${workspaceFolder}`?**
+> In VS Code, `${workspaceFolder}` is a built-in variable that dynamically resolves to the root folder of the project currently open in your editor (similar to `$PSScriptRoot` in PowerShell). This ensures the configuration works seamlessly on any machine without hardcoding user directory paths (e.g., `C:\Users\John\...`).
+
+---
+
+## 💬 Example Prompts for the AI Agent
+
+Once connected, you can ask your AI agent questions like:
 
 - *"Run a domain migration audit for target domain `newcompany.com` and old domain `oldcompany.com`."*
 - *"Check Intune for noncompliant devices and tell me why they are failing."*
 - *"Who has permission to view or edit `ceo@company.com`'s calendar?"*
 - *"Does `john@company.com` have an Out of Office message turned on?"*
 - *"What personal devices are registered to my account in Entra ID?"*
-

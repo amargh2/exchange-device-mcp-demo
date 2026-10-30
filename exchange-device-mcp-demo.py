@@ -29,10 +29,6 @@ import requests
 import msal
 from dotenv import load_dotenv
 
-# Set preferred browser for the sign-in prompt on Linux (on Windows, native default is used)
-if sys.platform != "win32" and "BROWSER" not in os.environ:
-    os.environ["BROWSER"] = "firefox"
-
 # ==============================================================================
 # SECTION 1: CONFIGURATION & PERMISSIONS
 # ==============================================================================
