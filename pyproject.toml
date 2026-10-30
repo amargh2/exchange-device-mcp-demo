@@ -1,0 +1,17 @@
+[project]
+name = "exchange-device-mcp-demos"
+version = "0.1.0"
+description = "Exchange and Device Management MCP Server"
+authors = [
+    { email = "margherioa@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "mcp[cli]>=2.3.0",
+    "msal>=1.39.0",
+    "python-dotenv>=1.2.4",
+    "requests>=2.34.2",
+]
+
+[tool.uv]
+package = false

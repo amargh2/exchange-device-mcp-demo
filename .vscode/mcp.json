@@ -1,0 +1,19 @@
+{
+	"servers": {
+		"exchange-device-mcp-demos": {
+			"type": "stdio",
+			"command": "uv",
+			"args": [
+				"run",
+				"--directory",
+				"${workspaceFolder}",
+				"exchange-device-mcp-demo.py"
+			],
+			"env": {
+				"BROWSER": "firefox",
+				"DISPLAY": ":0"
+			}
+		}
+	}
+}
+
