@@ -182,11 +182,16 @@ def get_recent_emails(top: int = 5) -> str:
     Fetch recent emails from the signed-in user's Exchange Online inbox.
     Returns: subject, sender, received date/time, and a short body preview.
     """
-    token = get_access_token()
-    headers = {"Authorization": f"Bearer {token}"}
-    params = {"$top": top, "$select": "subject,from,receivedDateTime,bodyPreview"}
-    res = requests.get("https://graph.microsoft.com/v1.0/me/messages", headers=headers, params=params)
-    return str(res.json().get("value", []))
+    access_token = get_access_token()
+    http_headers = {"Authorization": f"Bearer {access_token}"}
+    query_parameters = {"$top": top, "$select": "subject,from,receivedDateTime,bodyPreview"}
+    graph_response = requests.get(
+        "https://graph.microsoft.com/v1.0/me/messages",
+        headers=http_headers,
+        params=query_parameters
+    )
+    email_messages = graph_response.json().get("value", [])
+    return str(email_messages)
 
 
 # ------------------------------------------------------------------------------
@@ -198,10 +203,14 @@ def get_user_devices() -> str:
     List registered hardware/phones for the signed-in user from Microsoft Entra ID.
     Equivalent to viewing 'My Devices' in https://myaccount.microsoft.com.
     """
-    token = get_access_token()
-    headers = {"Authorization": f"Bearer {token}"}
-    res = requests.get("https://graph.microsoft.com/v1.0/me/registeredDevices", headers=headers)
-    return str(res.json().get("value", []))
+    access_token = get_access_token()
+    http_headers = {"Authorization": f"Bearer {access_token}"}
+    graph_response = requests.get(
+        "https://graph.microsoft.com/v1.0/me/registeredDevices",
+        headers=http_headers
+    )
+    user_devices = graph_response.json().get("value", [])
+    return str(user_devices)
 
 
 # ------------------------------------------------------------------------------
@@ -219,76 +228,100 @@ def audit_domain_migration(target_domain: str = "", old_domain: str = "") -> str
          from external clients or vendors sent to the old address will bounce (NDR 550)!
     """
     try:
-        token = get_access_token(scopes=ALL_SCOPES)
+        access_token = get_access_token(scopes=ALL_SCOPES)
     except Exception:
-        token = get_access_token(scopes=DEFAULT_SCOPES)
+        access_token = get_access_token(scopes=DEFAULT_SCOPES)
 
-    headers = {"Authorization": f"Bearer {token}"}
+    http_headers = {"Authorization": f"Bearer {access_token}"}
+
     # Microsoft Graph endpoint equivalent to running:
     # Get-MgUser -Select id,displayName,userPrincipalName,mail,proxyAddresses,accountEnabled -All
-    url = "https://graph.microsoft.com/v1.0/users?$select=id,displayName,userPrincipalName,mail,proxyAddresses,accountEnabled&$top=999"
-    res = requests.get(url, headers=headers)
+    graph_endpoint = "https://graph.microsoft.com/v1.0/users?$select=id,displayName,userPrincipalName,mail,proxyAddresses,accountEnabled&$top=999"
+    graph_response = requests.get(graph_endpoint, headers=http_headers)
 
-    if res.status_code == 403:
+    if graph_response.status_code == 403:
         return (
             "Access Denied (403 Forbidden). To audit users across the tenant, "
             "add the 'User.Read.All' delegated permission to your Azure App Registration "
             "and grant admin consent in Azure Portal."
         )
-    if not res.ok:
-        return f"Error from Microsoft Graph: {res.status_code} - {res.text}"
+    if not graph_response.ok:
+        return f"Error from Microsoft Graph: {graph_response.status_code} - {graph_response.text}"
 
-    users = res.json().get("value", [])
-    total_users = len(users)
-    mismatches = []
-    missing_old_alias = []
-    target_upn_count = 0
-    old_upn_count = 0
+    # Extract the user list from the Microsoft Graph response
+    all_users = graph_response.json().get("value", [])
+    total_users_count = len(all_users)
 
-    for u in users:
-        upn = (u.get("userPrincipalName") or "").lower()
-        mail = (u.get("mail") or "").lower()
-        # proxyAddresses holds all Exchange email aliases (e.g. SMTP:primary, smtp:alias)
-        proxies = [p.lower() for p in (u.get("proxyAddresses") or [])]
+    # Tracking lists and counts for our audit report
+    mismatched_accounts = []
+    missing_old_alias_accounts = []
+    target_domain_user_count = 0
+    old_domain_user_count = 0
 
-        # 1. Count progress towards target domain
-        if target_domain and upn.endswith(f"@{target_domain.lower()}"):
-            target_upn_count += 1
-        elif old_domain and upn.endswith(f"@{old_domain.lower()}"):
-            old_upn_count += 1
+    # Step through every user account in the tenant
+    for user_account in all_users:
+        user_display_name = user_account.get("displayName")
+        user_sign_in_name = (user_account.get("userPrincipalName") or "").lower()
+        user_primary_email = (user_account.get("mail") or "").lower()
 
-        # 2. Check for UPN and Primary Email discrepancies
-        if mail and upn != mail:
-            mismatches.append({
-                "displayName": u.get("displayName"),
-                "userPrincipalName": u.get("userPrincipalName"),
-                "primaryMail": u.get("mail"),
+        # proxyAddresses contains all Exchange routing addresses (e.g., SMTP:primary, smtp:alias)
+        raw_aliases = user_account.get("proxyAddresses") or []
+        email_aliases = []
+        for alias in raw_aliases:
+            email_aliases.append(alias.lower())
+
+        # Check 1: Count how many users have the target domain vs old domain
+        if target_domain and user_sign_in_name.endswith(f"@{target_domain.lower()}"):
+            target_domain_user_count += 1
+        elif old_domain and user_sign_in_name.endswith(f"@{old_domain.lower()}"):
+            old_domain_user_count += 1
+
+        # Check 2: Check for UPN vs Primary Email mismatches
+        # In a healthy migration, sign-in name (UPN) and primary email should generally match
+        if user_primary_email and (user_sign_in_name != user_primary_email):
+            mismatched_accounts.append({
+                "displayName": user_display_name,
+                "userPrincipalName": user_account.get("userPrincipalName"),
+                "primaryMail": user_account.get("mail"),
                 "issue": "UPN (sign-in) does not match primary mail address"
             })
 
-        # 3. Check for Bounce Risk (missing old domain fallback alias)
-        if target_domain and old_domain and (upn.endswith(f"@{target_domain.lower()}") or mail.endswith(f"@{target_domain.lower()}")):
-            has_old_alias = any(p.endswith(f"@{old_domain.lower()}") for p in proxies)
-            if not has_old_alias:
-                missing_old_alias.append({
-                    "displayName": u.get("displayName"),
-                    "userPrincipalName": u.get("userPrincipalName"),
-                    "primaryMail": u.get("mail"),
+        # Check 3: Check for Bounce Risk (missing old domain fallback alias)
+        # If a user is on the new domain, do they still have their old address as an alias?
+        is_on_new_domain = False
+        if target_domain:
+            if user_sign_in_name.endswith(f"@{target_domain.lower()}") or user_primary_email.endswith(f"@{target_domain.lower()}"):
+                is_on_new_domain = True
+
+        if is_on_new_domain and old_domain:
+            has_old_domain_alias = False
+            for alias in email_aliases:
+                if alias.endswith(f"@{old_domain.lower()}"):
+                    has_old_domain_alias = True
+                    break
+
+            # If the old alias is missing, incoming emails to their old address will bounce!
+            if not has_old_domain_alias:
+                missing_old_alias_accounts.append({
+                    "displayName": user_display_name,
+                    "userPrincipalName": user_account.get("userPrincipalName"),
+                    "primaryMail": user_account.get("mail"),
                     "issue": f"Missing @{old_domain} fallback in proxyAddresses. Senders emailing the old address will get bounce errors!"
                 })
 
-    report = {
+    # Build the clean, easy-to-read summary report
+    audit_report = {
         "summary": {
-            "total_users_scanned": total_users,
-            f"users_on_new_domain_{target_domain}": target_upn_count if target_domain else "N/A",
-            f"users_still_on_old_domain_{old_domain}": old_upn_count if old_domain else "N/A",
-            "upn_and_mail_mismatches_count": len(mismatches),
-            "missing_old_alias_bounce_risk_count": len(missing_old_alias)
+            "total_users_scanned": total_users_count,
+            f"users_on_new_domain_{target_domain}": target_domain_user_count if target_domain else "N/A",
+            f"users_still_on_old_domain_{old_domain}": old_domain_user_count if old_domain else "N/A",
+            "upn_and_mail_mismatches_count": len(mismatched_accounts),
+            "missing_old_alias_bounce_risk_count": len(missing_old_alias_accounts)
         },
-        "upn_vs_mail_mismatches": mismatches[:25],
-        "at_risk_missing_old_alias": missing_old_alias[:25]
+        "upn_vs_mail_mismatches": mismatched_accounts[:25],
+        "at_risk_missing_old_alias": missing_old_alias_accounts[:25]
     }
-    return json.dumps(report, indent=2)
+    return json.dumps(audit_report, indent=2)
 
 
 # ------------------------------------------------------------------------------
@@ -305,71 +338,91 @@ def get_noncompliant_devices() -> str:
       extracts the specific failing policy setting (e.g. BitLocker missing, OS outdated).
     """
     try:
-        token = get_access_token(scopes=ALL_SCOPES)
+        access_token = get_access_token(scopes=ALL_SCOPES)
     except Exception:
-        token = get_access_token(scopes=DEFAULT_SCOPES)
+        access_token = get_access_token(scopes=DEFAULT_SCOPES)
 
-    headers = {"Authorization": f"Bearer {token}"}
+    http_headers = {"Authorization": f"Bearer {access_token}"}
+
     # Microsoft Graph endpoint equivalent to running:
     # Get-MgDeviceManagementManagedDevice -Filter "complianceState eq 'noncompliant'"
-    url = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?$filter=complianceState eq 'noncompliant'&$select=id,deviceName,userPrincipalName,operatingSystem,osVersion,complianceState,lastSyncDateTime"
-    res = requests.get(url, headers=headers)
+    intune_devices_url = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?$filter=complianceState eq 'noncompliant'&$select=id,deviceName,userPrincipalName,operatingSystem,osVersion,complianceState,lastSyncDateTime"
+    graph_response = requests.get(intune_devices_url, headers=http_headers)
 
-    if res.status_code == 403:
+    if graph_response.status_code == 403:
         return (
             "Access Denied (403 Forbidden). To query Intune managed devices, "
             "add the 'DeviceManagementManagedDevices.Read.All' delegated permission to your Azure App Registration "
             "and grant admin consent in Azure Portal."
         )
-    if not res.ok:
-        return f"Error from Microsoft Graph: {res.status_code} - {res.text}"
+    if not graph_response.ok:
+        return f"Error from Microsoft Graph: {graph_response.status_code} - {graph_response.text}"
 
-    devices = res.json().get("value", [])
-    if not devices:
+    noncompliant_devices = graph_response.json().get("value", [])
+    if not noncompliant_devices:
         return "All clear! No noncompliant devices found in Intune. All managed machines meet policy requirements."
 
-    results = []
-    # Inspect each noncompliant device to find which specific setting triggered the failure
-    for d in devices[:20]:
-        dev_id = d.get("id")
-        policy_url = f"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{dev_id}/deviceCompliancePolicyStates"
-        p_res = requests.get(policy_url, headers=headers)
+    device_investigation_results = []
+
+    # Step through each noncompliant device and find out WHY it failed compliance
+    for device in noncompliant_devices[:20]:
+        device_id = device.get("id")
+        device_name = device.get("deviceName")
+        device_owner = device.get("userPrincipalName")
+        device_os = f"{device.get('operatingSystem')} {device.get('osVersion')}"
+        device_last_sync = device.get("lastSyncDateTime")
+
+        # Query the device's compliance policy states to drill down into the specific setting
+        policy_url = f"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{device_id}/deviceCompliancePolicyStates"
+        policy_response = requests.get(policy_url, headers=http_headers)
         failing_rules = []
 
-        if p_res.ok:
-            for policy in p_res.json().get("value", []):
-                if policy.get("state") in ("nonCompliant", "error", "conflict"):
+        if policy_response.ok:
+            compliance_policies = policy_response.json().get("value", [])
+            for policy in compliance_policies:
+                policy_state = policy.get("state")
+
+                # If the policy state is failed or error, check which setting broke
+                if policy_state in ("nonCompliant", "error", "conflict"):
                     policy_name = policy.get("displayName", "Unknown Policy")
-                    # Inspect settingStates to find the exact rule that broke
-                    for setting in policy.get("settingStates", []):
-                        if setting.get("state") in ("nonCompliant", "error", "conflict"):
+                    setting_states = policy.get("settingStates", [])
+
+                    for setting in setting_states:
+                        setting_state = setting.get("state")
+                        if setting_state in ("nonCompliant", "error", "conflict"):
                             failing_rules.append({
                                 "policy": policy_name,
                                 "setting": setting.get("settingName"),
-                                "state": setting.get("state")
+                                "state": setting_state
                             })
 
-        results.append({
-            "deviceName": d.get("deviceName"),
-            "userPrincipalName": d.get("userPrincipalName"),
-            "operatingSystem": f"{d.get('operatingSystem')} {d.get('osVersion')}",
-            "lastSyncDateTime": d.get("lastSyncDateTime"),
+        device_investigation_results.append({
+            "deviceName": device_name,
+            "userPrincipalName": device_owner,
+            "operatingSystem": device_os,
+            "lastSyncDateTime": device_last_sync,
             "failing_compliance_rules": failing_rules or ["Policy flagged noncompliant, setting details not available"]
         })
 
-    return json.dumps(results, indent=2)
+    return json.dumps(device_investigation_results, indent=2)
 
 
 # ==============================================================================
 # SECTION 5: SERVER EXECUTION & ENTRYPOINT
 # ==============================================================================
+# In Python, `if __name__ == "__main__":` means:
+# "If this file was directly run by a user in a terminal (not imported by another script), run this block."
 if __name__ == "__main__":
-    # Case 1: Human explicitly ran `--login`
+
+    # `sys.argv` is the list of command-line arguments passed to the script.
+    # Exactly like `$args` in PowerShell or `%1, %2` in batch files.
+    # If the user typed `python exchange-device-mcp-demo.py --login`, run the login function.
     if len(sys.argv) > 1 and sys.argv[1] in ("--login", "-l", "login"):
         login()
 
-    # Case 2: Human ran this in a terminal without arguments
-    # Check if we're already logged in; if not, kick off sign-in automatically
+    # `sys.stdin.isatty()` asks: "Is a human sitting at a real terminal keyboard?"
+    # If a person ran `uv run exchange-device-mcp-demo.py` in their terminal without arguments,
+    # we check if they are logged in. If not, we automatically trigger the login prompt for them!
     elif sys.stdin.isatty():
         try:
             get_access_token()
@@ -379,6 +432,7 @@ if __name__ == "__main__":
             print("No active login found. Launching authentication...\n")
             login()
 
-    # Case 3: Spawned in the background by an AI agent or IDE (stdio mode)
+    # If `sys.stdin.isatty()` is False, it means an automated program (like VS Code or an AI agent)
+    # launched this script in the background to send and receive JSON-RPC commands.
     else:
         mcp.run()
