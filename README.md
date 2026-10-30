@@ -31,10 +31,12 @@ A Model Context Protocol (MCP) server that connects AI assistants and agents (An
 - [`uv`](https://docs.astral.sh/uv/) (Fast Python package manager)
 - An Azure / Microsoft Entra ID App Registration with the following delegated permissions:
   - `User.Read`
-  - `User.Read.All`
-  - `Mail.Read`
   - `Device.Read`
+  - `MailboxSettings.Read`
+  - `Calendars.Read`
+  - `User.Read.All`
   - `DeviceManagementManagedDevices.Read.All`
+  *(Note: `Mail.Read` is NOT required. This tool physically cannot read email messages).*
 
 ---
 
@@ -102,3 +104,4 @@ Add the server to your `.vscode/mcp.json`:
 - *"Who has permission to view or edit `ceo@company.com`'s calendar?"*
 - *"Does `john@company.com` have an Out of Office message turned on?"*
 - *"What personal devices are registered to my account in Entra ID?"*
+

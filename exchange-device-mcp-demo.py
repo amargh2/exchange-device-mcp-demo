@@ -29,8 +29,9 @@ import requests
 import msal
 from dotenv import load_dotenv
 
-# Set preferred browser for the sign-in prompt (can be changed to chrome, edge, etc.)
-os.environ["BROWSER"] = "firefox"
+# Set preferred browser for the sign-in prompt on Linux (on Windows, native default is used)
+if sys.platform != "win32" and "BROWSER" not in os.environ:
+    os.environ["BROWSER"] = "firefox"
 
 # ==============================================================================
 # SECTION 1: CONFIGURATION & PERMISSIONS
@@ -42,11 +43,22 @@ TENANT_ID = os.getenv("TENANTID", "").strip() # Your Microsoft 365 Tenant ID
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 
 # Scopes explain: These are the exact Microsoft Graph permissions we request:
-# - User.Read, Mail.Read, Device.Read: Basic permissions to read own mailbox and devices.
-# - User.Read.All: Equivalent to reading the directory (like Get-MgUser).
+# Notice: WE DO NOT REQUEST 'Mail.Read' (we cannot read user email messages!)
+# - User.Read, Device.Read: Read own basic profile and registered personal hardware.
+# - MailboxSettings.Read: Read Out-of-Office auto-replies, regional time zone, and language.
+# - Calendars.Read: Read calendar folder sharing permissions (ACLs).
+# - User.Read.All: Directory-wide read for migration audits (like Get-MgUser).
 # - DeviceManagementManagedDevices.Read.All: Reading Intune device compliance states.
-DEFAULT_SCOPES = ["User.Read", "Mail.Read", "Device.Read"]
-ADMIN_SCOPES = ["User.Read.All", "DeviceManagementManagedDevices.Read.All"]
+DEFAULT_SCOPES = [
+    "User.Read",
+    "Device.Read",
+    "MailboxSettings.Read",
+    "Calendars.Read"
+]
+ADMIN_SCOPES = [
+    "User.Read.All",
+    "DeviceManagementManagedDevices.Read.All"
+]
 ALL_SCOPES = DEFAULT_SCOPES + ADMIN_SCOPES
 
 # Where to save the token on disk so you don't have to sign in every time
@@ -63,7 +75,7 @@ class InteractiveBrowserLauncher(webbrowser.BaseBrowser):
     """
     Ensures that when a sign-in is required:
     1. The Microsoft login link is printed clearly in the terminal (so you can click it).
-    2. It attempts to launch your system browser automatically in the background.
+    2. It attempts to launch your system browser automatically in the background (works on Windows, Mac, and Linux).
     """
     def open(self, url, new=0, autoraise=True):
         print("\n" + "=" * 78, flush=True)
@@ -72,13 +84,22 @@ class InteractiveBrowserLauncher(webbrowser.BaseBrowser):
         print(f"\n {url}\n", flush=True)
         print("=" * 78 + "\n", flush=True)
 
-        # Try launching the configured browser (Firefox)
-        browser = os.environ.get("BROWSER", "firefox")
-        try:
-            subprocess.Popen([browser, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return True
-        except Exception:
-            pass
+        # On Windows, os.startfile opens the default system browser natively (Edge, Chrome, etc.)
+        if sys.platform == "win32":
+            try:
+                os.startfile(url)
+                return True
+            except Exception:
+                pass
+
+        # Try launching the configured browser (Firefox / Chrome / etc.)
+        browser = os.environ.get("BROWSER")
+        if browser:
+            try:
+                subprocess.Popen([browser, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return True
+            except Exception:
+                pass
 
         # Fallback to system default opener (xdg-open on Linux)
         try:
