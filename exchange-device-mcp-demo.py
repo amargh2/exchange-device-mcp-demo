@@ -174,24 +174,99 @@ mcp = MCPServer("exchange-device-mcp-demos")
 
 
 # ------------------------------------------------------------------------------
-# TOOL 1: Read Recent Emails
+# TOOL 1: Calendar Folder Sharing & Permissions
 # ------------------------------------------------------------------------------
 @mcp.tool()
-def get_recent_emails(top: int = 5) -> str:
+def get_calendar_permissions(user_email: str = "") -> str:
     """
-    Fetch recent emails from the signed-in user's Exchange Online inbox.
-    Returns: subject, sender, received date/time, and a short body preview.
+    Check who has permission to view or edit a user's calendar.
+    PowerShell equivalent: Get-MailboxFolderPermission -Identity user:\\Calendar
+    
+    Parameters:
+      user_email (optional): Target user UPN or email (e.g. 'john@company.com').
+                             If left blank, checks your own calendar.
     """
     access_token = get_access_token()
     http_headers = {"Authorization": f"Bearer {access_token}"}
-    query_parameters = {"$top": top, "$select": "subject,from,receivedDateTime,bodyPreview"}
-    graph_response = requests.get(
-        "https://graph.microsoft.com/v1.0/me/messages",
-        headers=http_headers,
-        params=query_parameters
-    )
-    email_messages = graph_response.json().get("value", [])
-    return str(email_messages)
+
+    # If a specific email is provided, query that mailbox; otherwise query yourself (/me)
+    if user_email.strip():
+        graph_endpoint = f"https://graph.microsoft.com/v1.0/users/{user_email.strip()}/calendar/calendarPermissions"
+    else:
+        graph_endpoint = "https://graph.microsoft.com/v1.0/me/calendar/calendarPermissions"
+
+    graph_response = requests.get(graph_endpoint, headers=http_headers)
+
+    if graph_response.status_code == 404:
+        return "Mailbox not found or not provisioned in Exchange Online (user may not have an active Exchange Online license)."
+    if not graph_response.ok:
+        return f"Error from Microsoft Graph: {graph_response.status_code} - {graph_response.text}"
+
+    permissions_list = graph_response.json().get("value", [])
+    if not permissions_list:
+        return "No explicit calendar sharing permissions found."
+
+    clean_permissions = []
+    for permission in permissions_list:
+        user_info = permission.get("emailAddress", {})
+        shared_with_name = user_info.get("name", "Default / Anonymous")
+        shared_with_email = user_info.get("address", "N/A")
+        access_role = permission.get("role", "custom")
+        allowed_roles = permission.get("allowedRoles", [])
+
+        clean_permissions.append({
+            "sharedWith": shared_with_name,
+            "email": shared_with_email,
+            "accessRole": access_role,
+            "allowedCapabilities": allowed_roles
+        })
+
+    return json.dumps(clean_permissions, indent=2)
+
+
+# ------------------------------------------------------------------------------
+# TOOL 2: Mailbox Settings & Out-of-Office (Auto-Replies)
+# ------------------------------------------------------------------------------
+@mcp.tool()
+def get_mailbox_settings(user_email: str = "") -> str:
+    """
+    Check mailbox configuration, Out-of-Office (automatic replies), and regional time zone.
+    PowerShell equivalent: Get-MailboxAutoReplyConfiguration & Get-MailboxRegionalConfiguration
+    
+    Parameters:
+      user_email (optional): Target user UPN or email (e.g. 'john@company.com').
+                             If left blank, checks your own mailbox.
+    """
+    access_token = get_access_token()
+    http_headers = {"Authorization": f"Bearer {access_token}"}
+
+    if user_email.strip():
+        graph_endpoint = f"https://graph.microsoft.com/v1.0/users/{user_email.strip()}/mailboxSettings"
+    else:
+        graph_endpoint = "https://graph.microsoft.com/v1.0/me/mailboxSettings"
+
+    graph_response = requests.get(graph_endpoint, headers=http_headers)
+
+    if graph_response.status_code == 404:
+        return "Mailbox not found or not provisioned in Exchange Online (user may not have an active Exchange Online license)."
+    if not graph_response.ok:
+        return f"Error from Microsoft Graph: {graph_response.status_code} - {graph_response.text}"
+
+    settings_data = graph_response.json()
+    auto_reply = settings_data.get("automaticRepliesSetting", {})
+
+    clean_summary = {
+        "autoRepliesStatus": auto_reply.get("status", "unknown"),
+        "autoReplyMessageInternal": auto_reply.get("internalReplyMessage", ""),
+        "autoReplyMessageExternal": auto_reply.get("externalReplyMessage", ""),
+        "scheduledStartTime": auto_reply.get("scheduledStartDateTime", {}).get("dateTime", "N/A"),
+        "scheduledEndTime": auto_reply.get("scheduledEndDateTime", {}).get("dateTime", "N/A"),
+        "mailboxTimeZone": settings_data.get("timeZone", "N/A"),
+        "mailboxLanguage": settings_data.get("language", {}).get("locale", "N/A"),
+        "mailboxType": settings_data.get("userPurpose", "user")
+    }
+
+    return json.dumps(clean_summary, indent=2)
 
 
 # ------------------------------------------------------------------------------
