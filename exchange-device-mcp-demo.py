@@ -499,6 +499,85 @@ def get_noncompliant_devices() -> str:
     return json.dumps(device_investigation_results, indent=2)
 
 
+# ------------------------------------------------------------------------------
+# TOOL 5: Intune Installed Software & Application Inventory Search
+# ------------------------------------------------------------------------------
+@mcp.tool()
+def search_installed_apps(app_name: str = "") -> str:
+    """
+    Search software detected by Microsoft Intune across company-managed devices.
+    Used to reconcile security/cyber audit requests (e.g. 'Who has app X installed, and what version?').
+    
+    PowerShell equivalent: Get-MgDeviceManagementDetectedApp
+
+    Parameters:
+      app_name (optional): Software name to search for (e.g. 'Chrome', 'Zoom', 'VLC', '7-Zip').
+                           If left blank, returns the top discovered applications across the fleet.
+    """
+    try:
+        access_token = get_access_token(scopes=ALL_SCOPES)
+    except Exception:
+        access_token = get_access_token(scopes=DEFAULT_SCOPES)
+
+    http_headers = {"Authorization": f"Bearer {access_token}"}
+
+    # Query Microsoft Graph for detected software inventory
+    if app_name.strip():
+        search_query = app_name.strip()
+        graph_endpoint = f"https://graph.microsoft.com/v1.0/deviceManagement/detectedApps?$filter=contains(displayName, '{search_query}')&$top=20"
+    else:
+        graph_endpoint = "https://graph.microsoft.com/v1.0/deviceManagement/detectedApps?$top=25"
+
+    graph_response = requests.get(graph_endpoint, headers=http_headers)
+
+    if graph_response.status_code == 403:
+        return (
+            "Access Denied (403 Forbidden). To query Intune detected software, "
+            "ensure the 'DeviceManagementManagedDevices.Read.All' delegated permission is consented in Azure Portal."
+        )
+    if not graph_response.ok:
+        return f"Error from Microsoft Graph: {graph_response.status_code} - {graph_response.text}"
+
+    detected_apps = graph_response.json().get("value", [])
+    if not detected_apps:
+        if app_name.strip():
+            return f"No installed software matching '{app_name}' was found across Intune managed devices."
+        return "No detected applications found in Intune."
+
+    app_inventory_results = []
+
+    for app in detected_apps[:15]:
+        app_id = app.get("id")
+        app_display_name = app.get("displayName")
+        app_version = app.get("version", "N/A")
+        installed_device_count = app.get("deviceCount", 0)
+        app_platform = app.get("platform", "Unknown")
+
+        app_entry = {
+            "applicationName": app_display_name,
+            "version": app_version,
+            "platform": app_platform,
+            "installedDeviceCount": installed_device_count,
+            "devicesInstalledOn": []
+        }
+
+        # If searching for a specific software, drill into which exact machines have it installed
+        if app_name.strip() and installed_device_count > 0:
+            devices_endpoint = f"https://graph.microsoft.com/v1.0/deviceManagement/detectedApps/{app_id}/managedDevices?$select=deviceName,userPrincipalName,operatingSystem"
+            dev_response = requests.get(devices_endpoint, headers=http_headers)
+            if dev_response.ok:
+                for dev in dev_response.json().get("value", [])[:10]:
+                    app_entry["devicesInstalledOn"].append({
+                        "deviceName": dev.get("deviceName"),
+                        "userPrincipalName": dev.get("userPrincipalName"),
+                        "operatingSystem": dev.get("operatingSystem")
+                    })
+
+        app_inventory_results.append(app_entry)
+
+    return json.dumps(app_inventory_results, indent=2)
+
+
 # ==============================================================================
 # SECTION 5: SERVER EXECUTION & ENTRYPOINT
 # ==============================================================================

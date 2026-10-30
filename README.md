@@ -13,6 +13,7 @@ A Model Context Protocol (MCP) server that connects AI assistants and agents (An
 | **`get_calendar_permissions`** | `Get-MailboxFolderPermission -Identity user:\Calendar` | Checks calendar sharing and delegate Access Control Lists (ACLs) to see who has Reviewer, Editor, or Delegate rights. |
 | **`get_mailbox_settings`** | `Get-MailboxAutoReplyConfiguration` | Inspects Out-of-Office (automatic reply) status, internal/external reply messages, and regional mailbox time zones. |
 | **`get_user_devices`** | `Get-MgUserRegisteredDevice` | Lists registered mobile phones and personal hardware associated with a user in Microsoft Entra ID. |
+| **`search_installed_apps`** | `Get-MgDeviceManagementDetectedApp` | Searches discovered software across Intune-managed devices to reconcile cyber team tickets (e.g. find all machines with vulnerable versions of Zoom, 7-Zip, Chrome, etc.). |
 
 ---
 
@@ -129,6 +130,8 @@ Add the server to your project's `.vscode/mcp.json`:
 
 Once connected, you can ask your AI agent questions like:
 
+- *"Check if any company laptops have 7-Zip or Zoom installed, and tell me who has them."*
+- *"What are the top detected software applications across our Intune devices?"*
 - *"Run a domain migration audit for target domain `newcompany.com` and old domain `oldcompany.com`."*
 - *"Check Intune for noncompliant devices and tell me why they are failing."*
 - *"Who has permission to view or edit `ceo@company.com`'s calendar?"*
