@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import webbrowser
 import subprocess
 import requests
@@ -14,7 +15,10 @@ load_dotenv()
 CLIENT_ID = os.getenv("APPID", "").strip()
 TENANT_ID = os.getenv("TENANTID", "").strip()
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
-SCOPES = ["User.Read", "Mail.Read", "Device.Read"]
+
+DEFAULT_SCOPES = ["User.Read", "Mail.Read", "Device.Read"]
+ADMIN_SCOPES = ["User.Read.All", "DeviceManagementManagedDevices.Read.All"]
+ALL_SCOPES = DEFAULT_SCOPES + ADMIN_SCOPES
 
 CACHE_FILE = os.path.join(os.path.dirname(__file__), ".token_cache.bin")
 AUTH_PORT = 8400  # Fixed port for PKCE redirect (http://localhost:8400)
@@ -68,32 +72,33 @@ def save_cache(cache):
             f.write(cache.serialize())
 
 
-def get_access_token():
+def get_access_token(scopes=None):
     """Acquire token silently from persistent cache."""
+    target_scopes = scopes or DEFAULT_SCOPES
     app, cache = build_msal_app()
     accounts = app.get_accounts()
     result = None
 
     if accounts:
-        result = app.acquire_token_silent(SCOPES, account=accounts[0])
+        result = app.acquire_token_silent(target_scopes, account=accounts[0])
         save_cache(cache)
 
     if result and "access_token" in result:
         return result["access_token"]
 
     raise Exception(
-        "Exchange MCP Server is not authenticated. Please run:\n"
-        "  uv run Exchnage-MCP-Demo.py --login\n"
-        "in your terminal to complete the one-time PKCE sign-in."
+        f"Exchange MCP Server requires authentication for {target_scopes}. Please run:\n"
+        "  uv run exchange-device-mcp-demo.py --login\n"
+        "in your terminal to complete sign-in."
     )
 
 
 def login():
-    """One-time interactive PKCE login via browser."""
+    """One-time interactive PKCE login via browser with all scopes requested."""
     app, cache = build_msal_app()
     print(f"Initiating login on http://localhost:{AUTH_PORT} (BROWSER={os.environ.get('BROWSER')})...")
     result = app.acquire_token_interactive(
-        scopes=SCOPES,
+        scopes=ALL_SCOPES,
         port=AUTH_PORT,
         prompt="select_account"
     )
@@ -132,11 +137,136 @@ def get_user_devices() -> str:
     return str(res.json().get("value", []))
 
 
+@mcp.tool()
+def audit_domain_migration(target_domain: str = "", old_domain: str = "") -> str:
+    """Audit user UPNs, primary emails, and proxyAddresses for email domain migration and UPN cutover discrepancies."""
+    try:
+        token = get_access_token(scopes=ALL_SCOPES)
+    except Exception:
+        token = get_access_token(scopes=DEFAULT_SCOPES)
+
+    headers = {"Authorization": f"Bearer {token}"}
+    url = "https://graph.microsoft.com/v1.0/users?$select=id,displayName,userPrincipalName,mail,proxyAddresses,accountEnabled&$top=999"
+    res = requests.get(url, headers=headers)
+
+    if res.status_code == 403:
+        return (
+            "Access Denied (403 Forbidden). To run this audit across all tenant users, "
+            "add the 'User.Read.All' delegated permission to your Azure App Registration "
+            "and have an administrator grant consent."
+        )
+    if not res.ok:
+        return f"Error from Microsoft Graph: {res.status_code} - {res.text}"
+
+    users = res.json().get("value", [])
+    total_users = len(users)
+    mismatches = []
+    missing_old_alias = []
+    target_upn_count = 0
+    old_upn_count = 0
+
+    for u in users:
+        upn = (u.get("userPrincipalName") or "").lower()
+        mail = (u.get("mail") or "").lower()
+        proxies = [p.lower() for p in (u.get("proxyAddresses") or [])]
+
+        if target_domain and upn.endswith(f"@{target_domain.lower()}"):
+            target_upn_count += 1
+        elif old_domain and upn.endswith(f"@{old_domain.lower()}"):
+            old_upn_count += 1
+
+        # Check UPN vs Mail mismatch
+        if mail and upn != mail:
+            mismatches.append({
+                "displayName": u.get("displayName"),
+                "userPrincipalName": u.get("userPrincipalName"),
+                "primaryMail": u.get("mail"),
+                "issue": "UPN does not match primary mail"
+            })
+
+        # Check if migrated to target_domain but missing old_domain fallback alias in proxyAddresses
+        if target_domain and old_domain and (upn.endswith(f"@{target_domain.lower()}") or mail.endswith(f"@{target_domain.lower()}")):
+            has_old_alias = any(p.endswith(f"@{old_domain.lower()}") for p in proxies)
+            if not has_old_alias:
+                missing_old_alias.append({
+                    "displayName": u.get("displayName"),
+                    "userPrincipalName": u.get("userPrincipalName"),
+                    "primaryMail": u.get("mail"),
+                    "issue": f"Missing secondary alias (@{old_domain}) in proxyAddresses - incoming mail may bounce!"
+                })
+
+    report = {
+        "summary": {
+            "total_users_scanned": total_users,
+            f"users_with_target_domain_{target_domain}": target_upn_count if target_domain else "N/A",
+            f"users_with_old_domain_{old_domain}": old_upn_count if old_domain else "N/A",
+            "upn_and_mail_mismatches_count": len(mismatches),
+            "missing_old_alias_count": len(missing_old_alias)
+        },
+        "upn_vs_mail_mismatches": mismatches[:25],
+        "at_risk_missing_old_alias": missing_old_alias[:25]
+    }
+    return json.dumps(report, indent=2)
+
+
+@mcp.tool()
+def get_noncompliant_devices() -> str:
+    """Find noncompliant devices in Microsoft Intune and list the specific compliance policy failure reasons."""
+    try:
+        token = get_access_token(scopes=ALL_SCOPES)
+    except Exception:
+        token = get_access_token(scopes=DEFAULT_SCOPES)
+
+    headers = {"Authorization": f"Bearer {token}"}
+    url = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?$filter=complianceState eq 'noncompliant'&$select=id,deviceName,userPrincipalName,operatingSystem,osVersion,complianceState,lastSyncDateTime"
+    res = requests.get(url, headers=headers)
+
+    if res.status_code == 403:
+        return (
+            "Access Denied (403 Forbidden). To query Intune managed devices, "
+            "add the 'DeviceManagementManagedDevices.Read.All' delegated permission to your Azure App Registration "
+            "and have an administrator grant consent."
+        )
+    if not res.ok:
+        return f"Error from Microsoft Graph: {res.status_code} - {res.text}"
+
+    devices = res.json().get("value", [])
+    if not devices:
+        return "No noncompliant devices found in Intune! All managed devices are currently compliant."
+
+    results = []
+    for d in devices[:20]:
+        dev_id = d.get("id")
+        policy_url = f"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{dev_id}/deviceCompliancePolicyStates"
+        p_res = requests.get(policy_url, headers=headers)
+        failing_rules = []
+
+        if p_res.ok:
+            for policy in p_res.json().get("value", []):
+                if policy.get("state") in ("nonCompliant", "error", "conflict"):
+                    policy_name = policy.get("displayName", "Unknown Policy")
+                    for setting in policy.get("settingStates", []):
+                        if setting.get("state") in ("nonCompliant", "error", "conflict"):
+                            failing_rules.append({
+                                "policy": policy_name,
+                                "setting": setting.get("settingName"),
+                                "state": setting.get("state")
+                            })
+
+        results.append({
+            "deviceName": d.get("deviceName"),
+            "userPrincipalName": d.get("userPrincipalName"),
+            "operatingSystem": f"{d.get('operatingSystem')} {d.get('osVersion')}",
+            "lastSyncDateTime": d.get("lastSyncDateTime"),
+            "failing_compliance_rules": failing_rules or ["Policy flagged noncompliant, setting details not available"]
+        })
+
+    return json.dumps(results, indent=2)
+
+
 if __name__ == "__main__":
-    # If explicitly passed --login, run login
     if len(sys.argv) > 1 and sys.argv[1] in ("--login", "-l", "login"):
         login()
-    # If run interactively in a human terminal without arguments, check auth or prompt login
     elif sys.stdin.isatty():
         try:
             get_access_token()
@@ -145,6 +275,5 @@ if __name__ == "__main__":
         except Exception:
             print("No active login found. Launching authentication...\n")
             login()
-    # Otherwise run as stdio server for MCP agent/IDE
     else:
         mcp.run()
